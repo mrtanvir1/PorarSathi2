@@ -29,18 +29,24 @@ module.exports = async function handler(req, res) {
     parts.push({ inline_data: { mime_type: mediaType, data: image } });
   }
 
-  try {
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const call = async (genConfig) => {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 50000); // ৫০ সেকেন্ডের বেশি অপেক্ষা নয়
+    try {
+      return await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": key },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts }],
-          generationConfig: { maxOutputTokens: 4000 },
-        }),
-      }
-    );
+        body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: genConfig }),
+        signal: ac.signal,
+      });
+    } finally { clearTimeout(t); }
+  };
+
+  try {
+    // প্রথমে কম "ভাবার" সেটিং দিয়ে চেষ্টা (দ্রুত উত্তরের জন্য); মডেল না মানলে সাধারণ সেটিংয়ে আবার
+    let r = await call({ maxOutputTokens: 4000, thinkingConfig: { thinkingLevel: "low" } });
+    if (r.status === 400) r = await call({ maxOutputTokens: 4000 });
     const data = await r.json();
     if (!r.ok) {
       const status = r.status === 429 ? 429 : 502;
@@ -55,6 +61,7 @@ module.exports = async function handler(req, res) {
     }
     return res.status(200).json({ text });
   } catch (e) {
-    return res.status(502).json({ error: "AI-র সাথে সংযোগ হয়নি" });
+    const timeout = e && e.name === "AbortError";
+    return res.status(timeout ? 504 : 502).json({ error: timeout ? "AI উত্তর দিতে অনেক দেরি করছে" : "AI-র সাথে সংযোগ হয়নি" });
   }
 };

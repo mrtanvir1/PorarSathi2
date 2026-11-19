@@ -281,6 +281,8 @@ footer{margin-top:22px;text-align:center;color:var(--muted);font-size:13px}
     showMsg("");
     if(!q && !imgBlob){ showMsg("আগে একটা প্রশ্ন লিখো বা ছবি দাও।"); return; }
     ctrl = new AbortController();
+    var timedOut = false;
+    var tm = setTimeout(function(){ timedOut = true; if(ctrl) ctrl.abort(); }, 65000);
     setBusy(true); lastText = "";
     $("status").textContent = "সমাধান লেখা হচ্ছে…";
     $("out").classList.add("show");
@@ -301,11 +303,12 @@ footer{margin-top:22px;text-align:center;color:var(--muted);font-size:13px}
       if(lastText){ show(lastText, false); }
       var code = e && e.code;
       if(code === "rate_limited") showMsg("একটু বেশি অনুরোধ হয়ে গেছে। কিছুক্ষণ পর আবার চেষ্টা করো।");
+      else if(e && e.name === "AbortError" && timedOut) showMsg("অনেক সময় লাগছে, উত্তর আসেনি। একটু পরে আবার চেষ্টা করো, বা প্রশ্নটা ছোট করে দাও।");
       else if(e && e.name === "AbortError") $("status").textContent = "থামানো হয়েছে";
-      else showMsg("কিছু একটা সমস্যা হয়েছে। আবার চেষ্টা করো।");
+      else showMsg(e && e.code === "fail" && e.message ? "সমস্যা: " + e.message : "কিছু একটা সমস্যা হয়েছে। আবার চেষ্টা করো।");
       if(!lastText) $("out").classList.remove("show");
     }finally{
-      setBusy(false); ctrl = null;
+      clearTimeout(tm); setBusy(false); ctrl = null;
     }
   };
   $("stop").onclick = function(){ if(ctrl) ctrl.abort(); };

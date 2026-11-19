@@ -13,7 +13,9 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "GEMINI_API_KEY সেট করা নেই" });
   }
   // মডেলের নাম বদলাতে চাইলে Vercel-এ GEMINI_MODEL নামে Environment Variable দাও
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
+  // একটা মডেল ব্যস্ত থাকলে পরেরটায় চেষ্টা করা হবে
+  const models = [process.env.GEMINI_MODEL, "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-3.5-flash-lite"]
+    .filter((m, i, a) => m && a.indexOf(m) === i);
 
   const { prompt, image, mediaType } = req.body || {};
   if (typeof prompt !== "string" || !prompt.trim() || prompt.length > MAX_PROMPT) {
@@ -29,37 +31,47 @@ module.exports = async function handler(req, res) {
     parts.push({ inline_data: { mime_type: mediaType, data: image } });
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const call = async (genConfig) => {
+  const deadline = Date.now() + 52000; // সব চেষ্টা মিলিয়ে ৫২ সেকেন্ড
+  const call = async (model, genConfig) => {
     const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 50000); // ৫০ সেকেন্ডের বেশি অপেক্ষা নয়
+    const t = setTimeout(() => ac.abort(), Math.max(1000, deadline - Date.now()));
     try {
-      return await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-goog-api-key": key },
-        body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: genConfig }),
-        signal: ac.signal,
-      });
+      return await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-goog-api-key": key },
+          body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: genConfig }),
+          signal: ac.signal,
+        }
+      );
     } finally { clearTimeout(t); }
   };
 
+  let lastErr = "AI এখন উত্তর দিতে পারছে না, একটু পরে আবার চেষ্টা করো";
+  let lastStatus = 502;
   try {
-    // প্রথমে কম "ভাবার" সেটিং দিয়ে চেষ্টা (দ্রুত উত্তরের জন্য); মডেল না মানলে সাধারণ সেটিংয়ে আবার
-    let r = await call({ maxOutputTokens: 4000, thinkingConfig: { thinkingLevel: "low" } });
-    if (r.status === 400) r = await call({ maxOutputTokens: 4000 });
-    const data = await r.json();
-    if (!r.ok) {
-      const status = r.status === 429 ? 429 : 502;
-      return res.status(status).json({ error: data?.error?.message || "AI error" });
+    for (const model of models) {
+      if (Date.now() >= deadline) break;
+      // প্রথমে কম "ভাবার" সেটিং; মডেল না মানলে সাধারণ সেটিংয়ে
+      let r = await call(model, { maxOutputTokens: 4000, thinkingConfig: { thinkingLevel: "low" } });
+      if (r.status === 400) r = await call(model, { maxOutputTokens: 4000 });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        const text = (data.candidates?.[0]?.content?.parts || [])
+          .filter(p => p.text && !p.thought)
+          .map(p => p.text)
+          .join("\n");
+        if (text) return res.status(200).json({ text });
+        lastErr = "AI কোনো উত্তর দেয়নি, আবার চেষ্টা করো";
+        continue;
+      }
+      lastErr = data?.error?.message || "AI error";
+      lastStatus = r.status === 429 ? 429 : 502;
+      // ব্যস্ত (503), সীমা শেষ (429) বা মডেল নেই (404/400) হলে পরের মডেল; key ভুল হলে থামো
+      if (![400, 404, 429, 500, 503].includes(r.status)) break;
     }
-    const text = (data.candidates?.[0]?.content?.parts || [])
-      .filter(p => p.text && !p.thought)
-      .map(p => p.text)
-      .join("\n");
-    if (!text) {
-      return res.status(502).json({ error: "AI কোনো উত্তর দেয়নি, আবার চেষ্টা করো" });
-    }
-    return res.status(200).json({ text });
+    return res.status(lastStatus).json({ error: lastErr });
   } catch (e) {
     const timeout = e && e.name === "AbortError";
     return res.status(timeout ? 504 : 502).json({ error: timeout ? "AI উত্তর দিতে অনেক দেরি করছে" : "AI-র সাথে সংযোগ হয়নি" });
